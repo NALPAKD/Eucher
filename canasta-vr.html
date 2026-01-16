@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Canasta VR - Meta Quest 2</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { 
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+        background: #0f2e1d; 
+        color: white; 
+        overflow: hidden; 
+    }
+    
+    #overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0,0,0,0.9);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
+    }
+    
+    #vr-button {
+        padding: 20px 40px;
+        font-size: 24px;
+        background: #00ffff;
+        color: #000;
+        border: none;
+        border-radius: 10px;
+        cursor: pointer;
+        margin: 20px;
+        font-weight: bold;
+    }
+    
+    #vr-button:hover {
+        background: #00cccc;
+    }
+    
+    #vr-button:disabled {
+        background: #666;
+        cursor: not-allowed;
+    }
+    
+    #status {
+        color: #ffd700;
+        font-size: 18px;
+        margin: 10px;
+        text-align: center;
+    }
+    
+    #instructions {
+        max-width: 600px;
+        padding: 20px;
+        background: rgba(255,255,255,0.1);
+        border-radius: 10px;
+        margin: 20px;
+    }
+    
+    #instructions h2 {
+        color: #ffd700;
+        margin-bottom: 15px;
+    }
+    
+    #instructions ul {
+        list-style: none;
+        padding-left: 0;
+    }
+    
+    #instructions li {
+        margin: 10px 0;
+        padding-left: 25px;
+        position: relative;
+    }
+    
+    #instructions li:before {
+        content: "▶";
+        position: absolute;
+        left: 0;
+        color: #00ffff;
+    }
+    
+    canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+    }
+</style>
+</head>
+<body>
+
+<div id="overlay">
+    <h1 style="color: #ffd700; font-size: 48px; margin-bottom: 20px;">🃏 CANASTA VR 🃏</h1>
+    
+    <div id="instructions">
+        <h2>VR Controls</h2>
+        <ul>
+            <li><strong>Trigger</strong> - Select cards and interact</li>
+            <li><strong>Grip</strong> - Teleport around table</li>
+            <li><strong>Thumbstick</strong> - Rotate view</li>
+            <li><strong>A/X Button</strong> - Draw cards</li>
+            <li><strong>B/Y Button</strong> - Cancel selection</li>
+        </ul>
+        
+        <h2 style="margin-top: 20px;">Setup Required</h2>
+        <ul>
+            <li>Meta Quest 2 with latest firmware</li>
+            <li>HTTPS connection required for WebXR</li>
+            <li>Good lighting for hand tracking</li>
+        </ul>
+    </div>
+    
+    <button id="vr-button">Enter VR</button>
+    <div id="status">Checking VR support...</div>
+</div>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.159.0/build/three.module.js';
+import { VRButton } from 'https://cdn.jsdelivr.net/npm/three@0.159.0/examples/jsm/webxr/VRButton.js';
+import { XRControllerModelFactory } from 'https://cdn.jsdelivr.net/npm/three@0.159.0/examples/jsm/webxr/XRControllerModelFactory.js';
+
+// --- GAME CONFIG ---
+const SUITS = ['♠', '♣', '♥', '♦'];
+const RANKS = ['4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A', '2', '3', 'Joker'];
+const CARD_VALUES = { 
+    'Joker': 50, '2': 20, 'A': 20, 'K': 15, 'Q': 15, 'J': 15, 
+    '10': 15, '9': 15, '8': 15, '7': 5, '6': 5, '5': 5, '4': 5, '3': 5 
+};
+const PLAYERS = ['south', 'west', 'north', 'east'];
+
+// --- GAME STATE ---
+const game = {
+    deck: [],
+    hands: { south: [], west: [], north: [], east: [] },
+    discard: [],
+    melds: [],
+    red3s: { south: 0, west: 0, north: 0, east: 0 },
+    scores: { south: 0, west: 0, north: 0, east: 0 },
+    canastaCounts: { south: 0, west: 0, north: 0, east: 0 },
+    hasMelded: { south: false, west: false, north: false, east: false },
+    isFloating: { south: false, west: false, north: false, east: false },
+    mode: 'teams',
+    currentPlayerIndex: 0,
+    hasDrawn: false,
+    selectedCardIds: new Set(),
+    isGameOver: false,
+    isMatchOver: false
+};
+
+// --- VR SETUP ---
+let scene, camera, renderer, vrButton;
+let controller1, controller2;
+let raycaster, tempMatrix;
+let vrSession = null;
+
+// Card meshes and interactive objects
+let cardMeshes = [];
+let interactiveObjects = [];
+let handFans = { south: [], west: [], north: [], east: [] };
+let tableMelds = [];
+let deckPile, discardPile;
+let selectedLine;
+
+// UI Elements in VR
+let statusText, scoreBoards;
+
+function init() {
+    // Scene
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0f2e1d);
+    scene.fog = new THREE.Fog(0x0f2e1d, 5, 20);
+    
+    // Camera
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 1.6, 3); // Standing height
+    
+    // Renderer
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+    
+    // Lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+    
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight.position.set(2, 5, 3);
+    directionalLight.castShadow = true;
+    scene.add(directionalLight);
+    
+    // Table
+    createTable();
+    
+    // Room
+    createRoom();
+    
+    // Controllers
+    setupControllers();
+    
+    // Raycaster for interactions
+    raycaster = new THREE.Raycaster();
+    tempMatrix = new THREE.Matrix4();
+    
+    // Selection indicator
+    const lineGeometry = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, -1)
+    ]);
+    const lineMaterial = new THREE.LineBasicMaterial({ color: 0x00ffff });
+    selectedLine = new THREE.Line(lineGeometry, lineMaterial);
+    selectedLine.visible = false;
+    scene.add(selectedLine);
+    
+    // VR Button
+    setupVRButton();
+    
+    // Handle window resize
+    window.addEventListener('resize', onWindowResize);
+    
+    // Start animation loop
+    renderer.setAnimationLoop(render);
+}
+
+function createTable() {
+    // Green felt table
+    const tableGeometry = new THREE.CylinderGeometry(2.5, 2.5, 0.1, 32);
+    const tableMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0x27ae60,
+        roughness: 0.8,
+        metalness: 0.2
+    });
+    const table = new THREE.Mesh(tableGeometry, tableMaterial);
+    table.position.y = 0.8;
+    table.receiveShadow = true;
+    scene.add(table);
+    
+    // Table edge
+    const edgeGeometry = new THREE.TorusGeometry(2.5, 0.1, 16, 100);
+    const edgeMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0x8b4513,
+        roughness: 0.7
+    });
+    const edge = new THREE.Mesh(edgeGeometry, edgeMaterial);
+    edge.position.y = 0.8;
+    edge.rotation.x = Math.PI / 2;
+    scene.add(edge);
+}
+
+function createRoom() {
+    // Floor
+    const floorGeometry = new THREE.PlaneGeometry(20, 20);
+    const floorMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0x1a472a,
+        roughness: 0.9
+    });
+    const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+    floor.rotation.x = -Math.PI / 2;
+    floor.receiveShadow = true;
+    scene.add(floor);
+    
+    // Walls (simple box room)
+    const wallMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0x2c5f3c,
+        side: THREE.BackSide
+    });
+    const roomGeometry = new THREE.BoxGeometry(15, 6, 15);
+    const room = new THREE.Mesh(roomGeometry, wallMaterial);
+    room.position.y = 3;
+    scene.add(room);
+    
+    // Ceiling light
+    const lightGeometry = new THREE.SphereGeometry(0.3, 16, 16);
+    const lightMaterial = new THREE.MeshBasicMaterial({ color: 0xffffcc });
+    const ceilingLight = new THREE.Mesh(lightGeometry, lightMaterial);
+    ceilingLight.position.set(0, 5.5, 0);
+    scene.add(ceilingLight);
+}
+
+function setupControllers() {
+    const controllerModelFactory = new XRControllerModelFactory();
+    
+    // Controller 1 (Right hand typically)
+    controller1 = renderer.xr.getController(0);
+    controller1.addEventListener('selectstart', onSelectStart);
+    controller1.addEventListener('selectend', onSelectEnd);
+    controller1.addEventListener('squeezestart', onSqueezeStart);
+    scene.add(controller1);
+    
+    const grip1 = renderer.xr.getControllerGrip(0);
+    grip1.add(controllerModelFactory.createControllerModel(grip1));
+    scene.add(grip1);
+    
+    // Controller 2 (Left hand typically)
+    controller2 = renderer.xr.getController(1);
+    controller2.addEventListener('selectstart', onSelectStart);
+    controller2.addEventListener('selectend', onSelectEnd);
+    controller2.addEventListener('squeezestart', onSqueezeStart);
+    scene.add(controller2);
+    
+    const grip2 = renderer.xr.getControllerGrip(1);
+    grip2.add(controllerModelFactory.createControllerModel(grip2));
+    scene.add(grip2);
+    
+    // Add pointer rays to controllers
+    const rayGeometry = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, -1)
+    ]);
+    const rayMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.5, transparent: true });
+    
+    const ray1 = new THREE.Line(rayGeometry, rayMaterial);
+    ray1.scale.z = 5;
+    controller1.add(ray1);
+    
+    const ray2 = new THREE.Line(rayGeometry, rayMaterial);
+    ray2.scale.z = 5;
+    controller2.add(ray2);
+}
+
+function setupVRButton() {
+    const button = document.getElementById('vr-button');
+    const status = document.getElementById('status');
+    
+    if ('xr' in navigator) {
+        navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
+            if (supported) {
+                status.textContent = 'VR Ready! Click Enter VR to start.';
+                button.disabled = false;
+                
+                button.addEventListener('click', async () => {
+                    if (vrSession) {
+                        await vrSession.end();
+                    } else {
+                        const sessionInit = {
+                            optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
+                        };
+                        
+                        try {
+                            vrSession = await navigator.xr.requestSession('immersive-vr', sessionInit);
+                            await renderer.xr.setSession(vrSession);
+                            
+                            vrSession.addEventListener('end', () => {
+                                vrSession = null;
+                                button.textContent = 'Enter VR';
+                                document.getElementById('overlay').style.display = 'flex';
+                            });
+                            
+                            button.textContent = 'Exit VR';
+                            document.getElementById('overlay').style.display = 'none';
+                            
+                            // Initialize game
+                            newGame();
+                            
+                        } catch (error) {
+                            console.error('Failed to start VR session:', error);
+                            status.textContent = 'Error starting VR: ' + error.message;
+                        }
+                    }
+                });
+            } else {
+                status.textContent = 'VR not supported on this device';
+                button.disabled = true;
+            }
+        });
+    } else {
+        status.textContent = 'WebXR not available. Use HTTPS and latest browser.';
+        button.disabled = true;
+    }
+}
+
+// --- CARD CREATION ---
+function createCard(cardData, position, rotation = { x: 0, y: 0, z: 0 }) {
+    const cardGroup = new THREE.Group();
+    
+    // Card geometry
+    const geometry = new THREE.BoxGeometry(0.09, 0.13, 0.002);
+    
+    // Front face - white with text
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 356;
+    const ctx = canvas.getContext('2d');
+    
+    // White background
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Border
+    ctx.strokeStyle = '#333333';
+    ctx.lineWidth = 4;
+    ctx.strokeRect(0, 0, canvas.width, canvas.height);
+    
+    // Card content
+    const isRed = cardData.suit === '♥' || cardData.suit === '♦';
+    ctx.fillStyle = isRed ? '#cc0000' : '#000000';
+    ctx.font = 'bold 120px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(cardData.rank, canvas.width / 2, canvas.height / 2 - 30);
+    
+    ctx.font = 'bold 80px Arial';
+    ctx.fillText(cardData.suit, canvas.width / 2, canvas.height / 2 + 60);
+    
+    const frontTexture = new THREE.CanvasTexture(canvas);
+    const frontMaterial = new THREE.MeshStandardMaterial({ map: frontTexture });
+    
+    // Back face - card back pattern
+    const backCanvas = document.createElement('canvas');
+    backCanvas.width = 256;
+    backCanvas.height = 356;
+    const backCtx = backCanvas.getContext('2d');
+    
+    backCtx.fillStyle = '#2c3e50';
+    backCtx.fillRect(0, 0, backCanvas.width, backCanvas.height);
+    
+    // Pattern
+    backCtx.strokeStyle = '#34495e';
+    backCtx.lineWidth = 10;
+    for (let i = 0; i < backCanvas.width; i += 20) {
+        backCtx.beginPath();
+        backCtx.moveTo(i, 0);
+        backCtx.lineTo(i + 20, backCanvas.height);
+        backCtx.stroke();
+    }
+    
+    backCtx.strokeStyle = '#ffffff';
+    backCtx.lineWidth = 4;
+    backCtx.strokeRect(10, 10, backCanvas.width - 20, backCanvas.height - 20);
+    
+    const backTexture = new THREE.CanvasTexture(backCanvas);
+    const backMaterial = new THREE.MeshStandardMaterial({ map: backTexture });
+    
+    // Side materials
+    const sideMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff });
+    
+    const materials = [
+        sideMaterial, sideMaterial,  // sides
+        sideMaterial, sideMaterial,  // top/bottom
+        frontMaterial,               // front
+        backMaterial                 // back
+    ];
+    
+    const card = new THREE.Mesh(geometry, materials);
+    card.castShadow = true;
+    card.receiveShadow = true;
+    
+    cardGroup.add(card);
+    cardGroup.position.copy(position);
+    cardGroup.rotation.set(rotation.x, rotation.y, rotation.z);
+    
+    cardGroup.userData = {
+        cardData: cardData,
+        isCard: true,
+        isInteractive: true
+    };
+    
+    return cardGroup;
+}
+
+// --- GAME LOGIC ---
+function shuffle(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+}
+
+function newGame() {
+    game.scores = { south: 0, west: 0, north: 0, east: 0 };
+    game.isMatchOver = false;
+    resetHandState();
+    showMessage('New Game Started! First to 10,000 wins.');
+}
+
+function resetHandState() {
+    game.isGameOver = false;
+    game.deck = [];
+    game.melds = [];
+    game.discard = [];
+    game.red3s = { south: 0, west: 0, north: 0, east: 0 };
+    game.canastaCounts = { south: 0, west: 0, north: 0, east: 0 };
+    game.hasMelded = { south: false, west: false, north: false, east: false };
+    game.isFloating = { south: false, west: false, north: false, east: false };
+    game.currentPlayerIndex = 0;
+    game.hasDrawn = false;
+    game.selectedCardIds.clear();
+    
+    PLAYERS.forEach(p => game.hands[p] = []);
+    
+    // Create 3 decks (156 cards)
+    let id = 0;
+    for (let d = 0; d < 3; d++) {
+        SUITS.forEach(s => RANKS.forEach(r => {
+            if (r !== 'Joker') game.deck.push({ id: id++, rank: r, suit: s });
+        }));
+        game.deck.push({ id: id++, rank: 'Joker', suit: '🃏' });
+        game.deck.push({ id: id++, rank: 'Joker', suit: '🃏' });
+    }
+    shuffle(game.deck);
+    
+    // Deal 7 cards each
+    PLAYERS.forEach(p => {
+        for(let i = 0; i < 7; i++) {
+            if(game.deck.length) game.hands[p].push(game.deck.pop());
+        }
+    });
+    
+    // Initial discard
+    if(game.deck.length) {
+        let c = game.deck.pop();
+        while(c.rank === 'Joker' || c.rank === '3' || c.rank === '2') {
+            game.deck.unshift(c);
+            c = game.deck.pop();
+        }
+        game.discard.push(c);
+    }
+    
+    updateVRScene();
+}
+
+function updateVRScene() {
+    // Clear old meshes
+    cardMeshes.forEach(mesh => scene.remove(mesh));
+    cardMeshes = [];
+    interactiveObjects = [];
+    
+    // Create deck pile
+    if (game.deck.length > 0) {
+        const deckPos = new THREE.Vector3(0.5, 0.87, 0);
+        const deckCard = createCard({ rank: 'Back', suit: '' }, deckPos);
+        deckCard.userData.isDeck = true;
+        deckCard.userData.isInteractive = true;
+        scene.add(deckCard);
+        cardMeshes.push(deckCard);
+        interactiveObjects.push(deckCard);
+    }
+    
+    // Create discard pile
+    if (game.discard.length > 0) {
+        const discardPos = new THREE.Vector3(-0.5, 0.87, 0);
+        const topDiscard = game.discard[game.discard.length - 1];
+        const discardCard = createCard(topDiscard, discardPos);
+        discardCard.userData.isDiscard = true;
+        discardCard.userData.isInteractive = true;
+        scene.add(discardCard);
+        cardMeshes.push(discardCard);
+        interactiveObjects.push(discardCard);
+    }
+    
+    // Create player hands
+    createPlayerHand('south', new THREE.Vector3(0, 0.85, 1.5), 0);
+    createPlayerHand('north', new THREE.Vector3(0, 0.85, -1.5), Math.PI);
+    createPlayerHand('west', new THREE.Vector3(-1.5, 0.85, 0), Math.PI / 2);
+    createPlayerHand('east', new THREE.Vector3(1.5, 0.85, 0), -Math.PI / 2);
+    
+    // Create melds on table
+    createMeldsDisplay();
+    
+    // Update UI text
+    updateScoreBoards();
+}
+
+function createPlayerHand(player, basePos, rotationY) {
+    const hand = game.hands[player];
+    const isHuman = player === 'south';
+    
+    const fanWidth = 0.12;
+    const startX = -(hand.length * fanWidth) / 2;
+    
+    hand.forEach((card, index) => {
+        const xOffset = startX + (index * fanWidth);
+        const yOffset = isHuman ? 0 : 0;
+        const zOffset = isHuman ? 0 : 0;
+        
+        const pos = new THREE.Vector3(
+            basePos.x + Math.cos(rotationY) * xOffset,
+            basePos.y + yOffset,
+            basePos.z + Math.sin(rotationY) * xOffset
+        );
+        
+        const cardMesh = createCard(
+            isHuman ? card : { rank: 'Back', suit: '' },
+            pos,
+            { x: 0, y: rotationY, z: 0 }
+        );
+        
+        if (isHuman) {
+            cardMesh.userData.isInteractive = true;
+            cardMesh.userData.player = player;
+            interactiveObjects.push(cardMesh);
+        }
+        
+        scene.add(cardMesh);
+        cardMeshes.push(cardMesh);
+    });
+}
+
+function createMeldsDisplay() {
+    const meldStartX = -1;
+    const meldSpacing = 0.25;
+    
+    game.melds.forEach((meld, index) => {
+        const xPos = meldStartX + (index * meldSpacing);
+        const pos = new THREE.Vector3(xPos, 0.87, -0.5);
+        
+        // Show top 3 cards of meld
+        const displayCards = meld.cards.slice(-3);
+        displayCards.forEach((card, i) => {
+            const cardPos = new THREE.Vector3(
+                pos.x + (i * 0.02),
+                pos.y + (i * 0.005),
+                pos.z
+            );
+            
+            const cardMesh = createCard(card, cardPos);
+            cardMesh.userData.meldId = meld.id;
+            cardMesh.userData.isInteractive = true;
+            
+            scene.add(cardMesh);
+            cardMeshes.push(cardMesh);
+            interactiveObjects.push(cardMesh);
+        });
+    });
+}
+
+function updateScoreBoards() {
+    // Create floating text for scores
+    // This is simplified - in production you'd want proper 3D text or sprite-based UI
+    console.log('Scores:', game.scores);
+    console.log('Current Player:', PLAYERS[game.currentPlayerIndex]);
+}
+
+function showMessage(text) {
+    console.log('Message:', text);
+    // In VR, you'd show this as floating text near the player
+}
+
+// --- CONTROLLER INTERACTIONS ---
+function onSelectStart(event) {
+    const controller = event.target;
+    
+    tempMatrix.identity().extractRotation(controller.matrixWorld);
+    raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+    raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+    
+    const intersects = raycaster.intersectObjects(interactiveObjects, true);
+    
+    if (intersects.length > 0) {
+        const object = intersects[0].object.parent;
+        handleCardInteraction(object);
+    }
+}
+
+function onSelectEnd(event) {
+    // Handle release
+}
+
+function onSqueezeStart(event) {
+    // Handle grip button (teleport, etc.)
+    console.log('Squeeze detected');
+}
+
+function handleCardInteraction(object) {
+    if (!object.userData.isInteractive) return;
+    
+    if (object.userData.isDeck) {
+        humanDraw();
+    } else if (object.userData.isDiscard) {
+        attemptPickup();
+    } else if (object.userData.cardData) {
+        toggleCardSelection(object);
+    } else if (object.userData.meldId) {
+        handleMeldClick(object.userData.meldId);
+    }
+}
+
+function toggleCardSelection(cardObject) {
+    const cardId = cardObject.userData.cardData.id;
+    
+    if (game.selectedCardIds.has(cardId)) {
+        game.selectedCardIds.delete(cardId);
+        cardObject.position.y -= 0.05;
+    } else {
+        game.selectedCardIds.add(cardId);
+        cardObject.position.y += 0.05;
+    }
+}
+
+function humanDraw() {
+    if (game.currentPlayerIndex !== 0) return;
+    if (game.hasDrawn) {
+        showMessage("Already drawn!");
+        return;
+    }
+    if (game.deck.length === 0) {
+        showMessage("Deck empty!");
+        return;
+    }
+    
+    for(let i = 0; i < 2; i++) {
+        if(game.deck.length) game.hands.south.push(game.deck.pop());
+    }
+    game.hasDrawn = true;
+    
+    updateVRScene();
+    showMessage('Drew 2 cards.');
+}
+
+function attemptPickup() {
+    if (game.currentPlayerIndex !== 0) return;
+    if (game.hasDrawn) {
+        showMessage("Already acted!");
+        return;
+    }
+    if (game.discard.length === 0) return;
+    
+    const topCard = game.discard[game.discard.length - 1];
+    const hand = game.hands.south;
+    
+    if (topCard.rank === '3' && (topCard.suit === '♠' || topCard.suit === '♣')) {
+        showMessage("Blocked by Black 3.");
+        return;
+    }
+    if (topCard.rank === 'Joker' || topCard.rank === '2') {
+        showMessage("Cannot pickup wilds.");
+        return;
+    }
+    
+    const naturalsInHand = hand.filter(c => c.rank === topCard.rank).length;
+    if (naturalsInHand < 2) {
+        showMessage(`Need two ${topCard.rank}s.`);
+        return;
+    }
+    
+    while(game.discard.length) hand.push(game.discard.pop());
+    game.hasDrawn = true;
+    updateVRScene();
+    showMessage('Picked up pile!');
+}
+
+function handleMeldClick(meldId) {
+    // Implement meld interaction
+    console.log('Meld clicked:', meldId);
+}
+
+// --- RENDER LOOP ---
+function render() {
+    renderer.render(scene, camera);
+}
+
+function onWindowResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+// --- START ---
+init();
+document.body.appendChild(renderer.domElement);
+
+</script>
+</body>
+</html>

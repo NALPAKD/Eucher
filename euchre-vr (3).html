@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VR Euchre</title>
+    <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/aframe-environment-component@1.3.2/dist/aframe-environment-component.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        #ui-overlay {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            color: white;
+            font-family: Arial, sans-serif;
+            font-size: 18px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 10px;
+            z-index: 1000;
+            max-width: 300px;
+        }
+        #ui-overlay button {
+            margin: 5px;
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            border-radius: 5px;
+            border: none;
+            background: #4CAF50;
+            color: white;
+        }
+        #ui-overlay button:hover {
+            background: #45a049;
+        }
+        #ui-overlay button:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+        #start-overlay {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.9);
+            padding: 40px;
+            border-radius: 20px;
+            z-index: 2000;
+            text-align: center;
+        }
+        #start-overlay button {
+            padding: 20px 40px;
+            font-size: 24px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            margin: 10px;
+        }
+        #start-overlay button:hover {
+            background: #45a049;
+        }
+        #start-overlay h2 {
+            color: white;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div id="start-overlay">
+        <h2>VR Euchre</h2>
+        <button onclick="startNewRound(); document.getElementById('start-overlay').style.display='none';">Start Game</button>
+        <button onclick="window.testCards(); document.getElementById('start-overlay').style.display='none';">Test Cards</button>
+    </div>
+    
+    <div id="ui-overlay">
+        <div id="game-status">Loading Euchre...</div>
+        <div id="score-display"></div>
+        <div id="trump-display"></div>
+        <div id="action-buttons"></div>
+    </div>
+
+    <a-scene 
+        background="color: #1a472a"
+        vr-mode-ui="enabled: true"
+        device-orientation-permission-ui="enabled: false">
+        
+        <!-- Environment -->
+        <a-entity environment="preset: forest; groundColor: #1a472a; groundColor2: #0d2416"></a-entity>
+        
+        <!-- Lighting -->
+        <a-entity light="type: ambient; color: #BBB; intensity: 0.8"></a-entity>
+        <a-entity light="type: directional; color: #FFF; intensity: 0.6" position="-0.5 1 1"></a-entity>
+        <a-entity light="type: point; intensity: 0.8; distance: 10; decay: 2" position="0 2 0"></a-entity>
+
+        <!-- Game Table -->
+        <a-cylinder id="game-table" 
+                    position="0 0.75 -1.5" 
+                    radius="1.2" 
+                    height="0.05" 
+                    color="#2d5c3f"
+                    shadow="receive: true"></a-cylinder>
+        
+        <!-- Table felt overlay -->
+        <a-cylinder position="0 0.76 -1.5" 
+                    radius="1.15" 
+                    height="0.01" 
+                    color="#1e4d32"></a-cylinder>
+
+        <!-- Center text for game messages -->
+        <a-text id="center-message" 
+                value="" 
+                position="0 1.5 -1.5" 
+                align="center" 
+                color="#FFD700"
+                width="3"
+                font="roboto"></a-text>
+
+        <!-- Player positions (cards will be dynamically added) -->
+        <a-entity id="player-hand" position="0 1.8 -1.2"></a-entity>
+        <a-entity id="north-hand" position="0 1.8 -2.8"></a-entity>
+        <a-entity id="east-hand" position="1.5 1.8 -2.0" rotation="0 -90 0"></a-entity>
+        <a-entity id="west-hand" position="-1.5 1.8 -2.0" rotation="0 90 0"></a-entity>
+
+        <!-- Play area (center of table for tricks) -->
+        <a-entity id="play-area" position="0 0.8 -1.5"></a-entity>
+
+        <!-- Score display in VR -->
+        <a-text id="vr-score" 
+                value="Team 1: 0  |  Team 2: 0" 
+                position="0 2.0 -1.5" 
+                align="center" 
+                color="#FFFFFF"
+                width="2"></a-text>
+
+        <!-- Camera rig with controllers -->
+        <a-entity id="rig" position="0 1.6 0">
+            <a-entity camera look-controls wasd-controls="acceleration: 20">
+                <!-- Add cursor for clicking -->
+                <a-cursor
+                    color="#4CC3D9"
+                    fuse="true"
+                    fuse-timeout="1500"
+                    raycaster="objects: .clickable; far: 10">
+                </a-cursor>
+            </a-entity>
+            
+            <!-- Left controller -->
+            <a-entity id="left-hand" 
+                      oculus-touch-controls="hand: left"
+                      laser-controls="hand: left"
+                      raycaster="objects: .clickable; far: 10; showLine: true"
+                      line="color: #4CC3D9; opacity: 0.75"></a-entity>
+            
+            <!-- Right controller -->
+            <a-entity id="right-hand" 
+                      oculus-touch-controls="hand: right"
+                      laser-controls="hand: right"
+                      raycaster="objects: .clickable; far: 10; showLine: true"
+                      line="color: #4CC3D9; opacity: 0.75"></a-entity>
+        </a-entity>
+    </a-scene>
+
+    <script>
+        // ===== EUCHRE GAME LOGIC =====
+        
+        const SUITS = ['hearts', 'diamonds', 'clubs', 'spades'];
+        const RANKS = ['9', '10', 'J', 'Q', 'K', 'A'];
+        const SUIT_COLORS = {
+            hearts: '#FF0000',
+            diamonds: '#FF0000',
+            clubs: '#000000',
+            spades: '#000000'
+        };
+        const SUIT_SYMBOLS = {
+            hearts: 'HEARTS',
+            diamonds: 'DIAMONDS', 
+            clubs: 'CLUBS',
+            spades: 'SPADES'
+        };
+
+        class EuchreGame {
+            constructor() {
+                this.deck = [];
+                this.players = [
+                    { name: 'You', hand: [], isHuman: true, team: 1 },
+                    { name: 'North', hand: [], isHuman: false, team: 2 },
+                    { name: 'East', hand: [], isHuman: false, team: 1 },
+                    { name: 'West', hand: [], isHuman: false, team: 2 }
+                ];
+                this.currentTrick = [];
+                this.trumpSuit = null;
+                this.dealer = 0;
+                this.currentPlayer = 1; // Player to left of dealer starts
+                this.scores = { team1: 0, team2: 0 };
+                this.tricksWon = { team1: 0, team2: 0 };
+                this.roundInProgress = false;
+                this.kitty = null;
+                this.trumpCaller = null;
+                this.goingAlone = false;
+                this.alonePlayer = null;
+                this.phase = 'dealing'; // dealing, trump-selection, playing, round-end
+                
+                this.initDeck();
+            }
+
+            initDeck() {
+                this.deck = [];
+                for (let suit of SUITS) {
+                    for (let rank of RANKS) {
+                        this.deck.push({ suit, rank });
+                    }
+                }
+            }
+
+            shuffle() {
+                for (let i = this.deck.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [this.deck[i], this.deck[j]] = [this.deck[j], this.deck[i]];
+                }
+            }
+
+            deal() {
+                this.initDeck();
+                this.shuffle();
+                
+                // Clear hands
+                this.players.forEach(p => p.hand = []);
+                
+                // Deal 5 cards to each player (2-3-2-3 pattern in real Euchre, but we'll simplify)
+                for (let i = 0; i < 5; i++) {
+                    for (let player of this.players) {
+                        player.hand.push(this.deck.pop());
+                    }
+                }
+                
+                // Top card is the kitty
+                this.kitty = this.deck.pop();
+                this.phase = 'trump-selection';
+                this.roundInProgress = true;
+                this.tricksWon = { team1: 0, team2: 0 };
+                this.currentTrick = [];
+            }
+
+            getCardValue(card, trumpSuit, leadSuit) {
+                // Euchre card hierarchy
+                const leftBowerSuit = this.getLeftBowerSuit(trumpSuit);
+                
+                // Right bower (Jack of trump)
+                if (card.rank === 'J' && card.suit === trumpSuit) {
+                    return 1000;
+                }
+                
+                // Left bower (Jack of same color)
+                if (card.rank === 'J' && card.suit === leftBowerSuit) {
+                    return 900;
+                }
+                
+                // Trump cards
+                if (card.suit === trumpSuit) {
+                    const rankValues = { 'A': 800, 'K': 700, 'Q': 600, '10': 500, '9': 400 };
+                    return rankValues[card.rank] || 300;
+                }
+                
+                // Lead suit cards
+                if (card.suit === leadSuit) {
+                    const rankValues = { 'A': 200, 'K': 190, 'Q': 180, 'J': 170, '10': 160, '9': 150 };
+                    return rankValues[card.rank] || 100;
+                }
+                
+                // Off-suit cards
+                return 0;
+            }
+
+            getLeftBowerSuit(trumpSuit) {
+                const sameColorSuits = {
+                    hearts: 'diamonds',
+                    diamonds: 'hearts',
+                    clubs: 'spades',
+                    spades: 'clubs'
+                };
+                return sameColorSuits[trumpSuit];
+            }
+
+            getEffectiveSuit(card, trumpSuit) {
+                // Left bower counts as trump suit
+                const leftBowerSuit = this.getLeftBowerSuit(trumpSuit);
+                if (card.rank === 'J' && card.suit === leftBowerSuit) {
+                    return trumpSuit;
+                }
+                return card.suit;
+            }
+
+            canPlayCard(card, playerHand, leadSuit) {
+                if (!leadSuit) return true; // Leading player can play any card
+                
+                const effectiveSuit = this.getEffectiveSuit(card, this.trumpSuit);
+                
+                // Must follow lead suit if possible
+                const hasLeadSuit = playerHand.some(c => 
+                    this.getEffectiveSuit(c, this.trumpSuit) === leadSuit
+                );
+                
+                if (hasLeadSuit) {
+                    return effectiveSuit === leadSuit;
+                }
+                
+                return true; // Can play any card if can't follow suit
+            }
+
+            playCard(playerIndex, cardIndex) {
+                const player = this.players[playerIndex];
+                const card = player.hand[cardIndex];
+                
+                const leadSuit = this.currentTrick.length > 0 
+                    ? this.getEffectiveSuit(this.currentTrick[0].card, this.trumpSuit)
+                    : null;
+                
+                if (!this.canPlayCard(card, player.hand, leadSuit)) {
+                    return false; // Invalid play
+                }
+                
+                // Remove card from hand and add to trick
+                player.hand.splice(cardIndex, 1);
+                this.currentTrick.push({ playerIndex, card });
+                
+                // Check if trick is complete
+                if (this.currentTrick.length === 4) {
+                    setTimeout(() => this.evaluateTrick(), 2000);
+                } else {
+                    this.currentPlayer = (this.currentPlayer + 1) % 4;
+                    if (!this.players[this.currentPlayer].isHuman) {
+                        setTimeout(() => this.aiPlay(), 1000);
+                    }
+                }
+                
+                return true;
+            }
+
+            evaluateTrick() {
+                const leadSuit = this.getEffectiveSuit(this.currentTrick[0].card, this.trumpSuit);
+                
+                let winningPlay = this.currentTrick[0];
+                let highestValue = this.getCardValue(winningPlay.card, this.trumpSuit, leadSuit);
+                
+                for (let i = 1; i < this.currentTrick.length; i++) {
+                    const play = this.currentTrick[i];
+                    const value = this.getCardValue(play.card, this.trumpSuit, leadSuit);
+                    if (value > highestValue) {
+                        highestValue = value;
+                        winningPlay = play;
+                    }
+                }
+                
+                const winner = this.players[winningPlay.playerIndex];
+                const winningTeam = winner.team;
+                this.tricksWon[`team${winningTeam}`]++;
+                
+                updateCenterMessage(`${winner.name} wins the trick!`);
+                
+                this.currentTrick = [];
+                this.currentPlayer = winningPlay.playerIndex;
+                
+                // Check if hand is complete
+                if (this.players[0].hand.length === 0) {
+                    setTimeout(() => this.endRound(), 2000);
+                } else {
+                    setTimeout(() => {
+                        updateCenterMessage('');
+                        renderGameState();
+                        if (!this.players[this.currentPlayer].isHuman) {
+                            setTimeout(() => this.aiPlay(), 1000);
+                        }
+                    }, 2000);
+                }
+            }
+
+            endRound() {
+                const team1Tricks = this.tricksWon.team1;
+                const team2Tricks = this.tricksWon.team2;
+                
+                const callerTeam = this.players[this.trumpCaller].team;
+                const defenderTeam = callerTeam === 1 ? 2 : 1;
+                
+                const callerTricks = this.tricksWon[`team${callerTeam}`];
+                const defenderTricks = this.tricksWon[`team${defenderTeam}`];
+                
+                let message = '';
+                
+                if (callerTricks >= 3) {
+                    if (callerTricks === 5) {
+                        const points = this.goingAlone ? 4 : 2;
+                        this.scores[`team${callerTeam}`] += points;
+                        message = `Team ${callerTeam} marches! +${points} points`;
+                    } else {
+                        this.scores[`team${callerTeam}`] += 1;
+                        message = `Team ${callerTeam} wins! +1 point`;
+                    }
+                } else {
+                    this.scores[`team${defenderTeam}`] += 2;
+                    message = `Team ${defenderTeam} euchres Team ${callerTeam}! +2 points`;
+                }
+                
+                updateCenterMessage(message);
+                this.roundInProgress = false;
+                this.phase = 'round-end';
+                
+                // Check for game win
+                if (this.scores.team1 >= 10 || this.scores.team2 >= 10) {
+                    const winner = this.scores.team1 >= 10 ? 1 : 2;
+                    setTimeout(() => {
+                        updateCenterMessage(`🎉 Team ${winner} wins the game! 🎉`);
+                        updateGameStatus('Game Over! Refresh to play again.');
+                    }, 3000);
+                } else {
+                    setTimeout(() => {
+                        this.dealer = (this.dealer + 1) % 4;
+                        this.currentPlayer = (this.dealer + 1) % 4;
+                        startNewRound();
+                    }, 4000);
+                }
+                
+                updateScoreDisplay();
+            }
+
+            aiPlay() {
+                const player = this.players[this.currentPlayer];
+                const validCards = [];
+                
+                const leadSuit = this.currentTrick.length > 0 
+                    ? this.getEffectiveSuit(this.currentTrick[0].card, this.trumpSuit)
+                    : null;
+                
+                player.hand.forEach((card, index) => {
+                    if (this.canPlayCard(card, player.hand, leadSuit)) {
+                        validCards.push(index);
+                    }
+                });
+                
+                // Simple AI: play highest valid card
+                let bestCardIndex = validCards[0];
+                let bestValue = this.getCardValue(player.hand[bestCardIndex], this.trumpSuit, leadSuit);
+                
+                for (let index of validCards) {
+                    const value = this.getCardValue(player.hand[index], this.trumpSuit, leadSuit);
+                    if (value > bestValue) {
+                        bestValue = value;
+                        bestCardIndex = index;
+                    }
+                }
+                
+                this.playCard(this.currentPlayer, bestCardIndex);
+                renderGameState();
+            }
+
+            aiTrumpDecision(playerIndex, round) {
+                // Simple AI trump selection
+                const player = this.players[playerIndex];
+                
+                if (round === 1) {
+                    // Check if has kitty suit cards
+                    const kittySuitCards = player.hand.filter(c => c.suit === this.kitty.suit);
+                    if (kittySuitCards.length >= 2 || 
+                        kittySuitCards.some(c => c.rank === 'J' || c.rank === 'A')) {
+                        return 'order-up';
+                    }
+                    return 'pass';
+                } else {
+                    // Pick a suit other than kitty
+                    const suits = SUITS.filter(s => s !== this.kitty.suit);
+                    const suitCounts = {};
+                    suits.forEach(s => {
+                        suitCounts[s] = player.hand.filter(c => c.suit === s).length;
+                    });
+                    
+                    const bestSuit = suits.reduce((a, b) => suitCounts[a] > suitCounts[b] ? a : b);
+                    if (suitCounts[bestSuit] >= 2) {
+                        return bestSuit;
+                    }
+                    return 'pass';
+                }
+            }
+        }
+
+        // ===== GLOBAL GAME STATE =====
+        let game = new EuchreGame();
+
+        // ===== UI FUNCTIONS =====
+        function updateGameStatus(message) {
+            document.getElementById('game-status').textContent = message;
+        }
+
+        function updateScoreDisplay() {
+            const scoreText = `Team 1: ${game.scores.team1}  |  Team 2: ${game.scores.team2}`;
+            document.getElementById('score-display').innerHTML = `<strong>${scoreText}</strong>`;
+            
+            const vrScore = document.querySelector('#vr-score');
+            if (vrScore) {
+                vrScore.setAttribute('value', scoreText);
+            }
+        }
+
+        function updateTrumpDisplay() {
+            if (game.trumpSuit) {
+                const trumpText = `Trump: ${SUIT_SYMBOLS[game.trumpSuit]} ${game.trumpSuit}`;
+                document.getElementById('trump-display').innerHTML = `<strong style="color: ${SUIT_COLORS[game.trumpSuit]}">${trumpText}</strong>`;
+            } else {
+                document.getElementById('trump-display').innerHTML = '';
+            }
+        }
+
+        function updateCenterMessage(message) {
+            const centerMsg = document.querySelector('#center-message');
+            if (centerMsg) {
+                centerMsg.setAttribute('value', message);
+            }
+        }
+
+        function updateActionButtons() {
+            const buttonsDiv = document.getElementById('action-buttons');
+            buttonsDiv.innerHTML = '';
+            
+            if (game.phase === 'trump-selection') {
+                // Trump selection UI would go here
+            }
+        }
+
+        // ===== 3D RENDERING =====
+        function createCard(card, position, rotation, scale = 1, clickable = false) {
+            const cardEntity = document.createElement('a-entity');
+            cardEntity.setAttribute('position', position);
+            cardEntity.setAttribute('rotation', rotation);
+            
+            if (clickable) {
+                cardEntity.classList.add('clickable');
+            }
+            
+            const width = 0.3 * scale;
+            const height = 0.42 * scale;
+            
+            // Card background (white)
+            const bg = document.createElement('a-plane');
+            bg.setAttribute('width', width);
+            bg.setAttribute('height', height);
+            bg.setAttribute('color', '#FFFFFF');
+            bg.setAttribute('shadow', 'cast: true; receive: true');
+            bg.setAttribute('material', 'side: double');
+            cardEntity.appendChild(bg);
+            
+            // Card border (black outline)
+            const border = document.createElement('a-plane');
+            border.setAttribute('width', width * 1.05);
+            border.setAttribute('height', height * 1.05);
+            border.setAttribute('color', '#000000');
+            border.setAttribute('position', '0 0 -0.002');
+            border.setAttribute('material', 'side: double');
+            cardEntity.appendChild(border);
+            
+            // Hover effect - add green highlight when hovered
+            if (clickable) {
+                const hoverBorder = document.createElement('a-plane');
+                hoverBorder.setAttribute('width', width * 1.1);
+                hoverBorder.setAttribute('height', height * 1.1);
+                hoverBorder.setAttribute('color', '#00FF00');
+                hoverBorder.setAttribute('position', '0 0 -0.003');
+                hoverBorder.setAttribute('material', 'side: double; opacity: 0');
+                hoverBorder.classList.add('hover-highlight');
+                cardEntity.appendChild(hoverBorder);
+                
+                // Add hover listeners
+                cardEntity.addEventListener('mouseenter', () => {
+                    hoverBorder.setAttribute('material', 'opacity: 0.5');
+                });
+                cardEntity.addEventListener('mouseleave', () => {
+                    hoverBorder.setAttribute('material', 'opacity: 0');
+                });
+            }
+            
+            // Top left corner - Rank and suit
+            const topCorner = document.createElement('a-text');
+            topCorner.setAttribute('value', `${card.rank}\n${SUIT_SYMBOLS[card.suit]}`);
+            topCorner.setAttribute('align', 'center');
+            topCorner.setAttribute('color', SUIT_COLORS[card.suit]);
+            topCorner.setAttribute('width', width * 1.5);
+            topCorner.setAttribute('position', `${-width * 0.3} ${height * 0.32} 0.002`);
+            topCorner.setAttribute('font', 'roboto');
+            topCorner.setAttribute('baseline', 'top');
+            topCorner.setAttribute('line-height', 40);
+            cardEntity.appendChild(topCorner);
+            
+            // Large center suit symbol
+            const centerSuit = document.createElement('a-text');
+            centerSuit.setAttribute('value', SUIT_SYMBOLS[card.suit]);
+            centerSuit.setAttribute('align', 'center');
+            centerSuit.setAttribute('color', SUIT_COLORS[card.suit]);
+            centerSuit.setAttribute('width', width * 3);
+            centerSuit.setAttribute('position', `0 0 0.002`);
+            centerSuit.setAttribute('font', 'roboto');
+            centerSuit.setAttribute('anchor', 'center');
+            cardEntity.appendChild(centerSuit);
+            
+            // Center rank (for face cards, show rank prominently)
+            const centerRank = document.createElement('a-text');
+            centerRank.setAttribute('value', card.rank);
+            centerRank.setAttribute('align', 'center');
+            centerRank.setAttribute('color', SUIT_COLORS[card.suit]);
+            centerRank.setAttribute('width', width * 2);
+            centerRank.setAttribute('position', `0 ${height * 0.15} 0.002`);
+            centerRank.setAttribute('font', 'roboto');
+            cardEntity.appendChild(centerRank);
+            
+            // Bottom right corner - Rank and suit (upside down)
+            const bottomCorner = document.createElement('a-text');
+            bottomCorner.setAttribute('value', `${card.rank}\n${SUIT_SYMBOLS[card.suit]}`);
+            bottomCorner.setAttribute('align', 'center');
+            bottomCorner.setAttribute('color', SUIT_COLORS[card.suit]);
+            bottomCorner.setAttribute('width', width * 1.5);
+            bottomCorner.setAttribute('position', `${width * 0.3} ${-height * 0.32} 0.002`);
+            bottomCorner.setAttribute('rotation', '0 0 180');
+            bottomCorner.setAttribute('font', 'roboto');
+            bottomCorner.setAttribute('baseline', 'top');
+            bottomCorner.setAttribute('line-height', 40);
+            cardEntity.appendChild(bottomCorner);
+            
+            return cardEntity;
+        }
+
+        function renderGameState() {
+            console.log('Rendering game state...', {
+                playerHandSize: game.players[0].hand.length,
+                phase: game.phase,
+                currentPlayer: game.currentPlayer
+            });
+            
+            // Clear existing cards
+            ['player-hand', 'north-hand', 'east-hand', 'west-hand', 'play-area'].forEach(id => {
+                const container = document.getElementById(id);
+                while (container.firstChild) {
+                    container.removeChild(container.firstChild);
+                }
+            });
+            
+            console.log('Rendering player hand with', game.players[0].hand.length, 'cards');
+            
+            // Render player hand
+            const playerHand = document.getElementById('player-hand');
+            game.players[0].hand.forEach((card, index) => {
+                const xOffset = (index - 2) * 0.35; // More spacing
+                const isClickable = game.currentPlayer === 0 && game.phase === 'playing';
+                const cardEntity = createCard(
+                    card,
+                    `${xOffset} 0 0`,
+                    '0 0 0', // Straight facing
+                    1.5, // Larger scale
+                    isClickable
+                );
+                
+                // Store the card index on the entity
+                cardEntity.setAttribute('data-card-index', index);
+                
+                // Add click handler
+                if (isClickable) {
+                    cardEntity.addEventListener('click', function(evt) {
+                        const cardIndex = parseInt(this.getAttribute('data-card-index'));
+                        console.log('Card clicked:', cardIndex, card);
+                        if (game.playCard(0, cardIndex)) {
+                            renderGameState();
+                        } else {
+                            updateCenterMessage('Cannot play that card!');
+                            setTimeout(() => updateCenterMessage(''), 2000);
+                        }
+                    });
+                }
+                
+                playerHand.appendChild(cardEntity);
+            });
+            
+            // Render AI hands (face down)
+            const aiHands = [
+                { id: 'north-hand', playerIndex: 1 },
+                { id: 'east-hand', playerIndex: 2 },
+                { id: 'west-hand', playerIndex: 3 }
+            ];
+            
+            aiHands.forEach(({ id, playerIndex }) => {
+                const container = document.getElementById(id);
+                game.players[playerIndex].hand.forEach((card, index) => {
+                    const xOffset = (index - 2) * 0.25;
+                    const backCard = document.createElement('a-plane');
+                    backCard.setAttribute('position', `${xOffset} 0 0`);
+                    backCard.setAttribute('width', '0.3');
+                    backCard.setAttribute('height', '0.42');
+                    backCard.setAttribute('color', '#0066CC');
+                    backCard.setAttribute('material', 'side: double');
+                    backCard.setAttribute('shadow', 'cast: true');
+                    container.appendChild(backCard);
+                });
+            });
+            
+            // Render cards in play
+            if (game.currentTrick.length > 0) {
+                const playArea = document.getElementById('play-area');
+                const positions = [
+                    '0 0 0.3',      // South (player)
+                    '0 0 -0.3',     // North
+                    '0.3 0 0',      // East
+                    '-0.3 0 0'      // West
+                ];
+                
+                game.currentTrick.forEach(({ playerIndex, card }) => {
+                    const cardEntity = createCard(card, positions[playerIndex], '-90 0 0', 1);
+                    playArea.appendChild(cardEntity);
+                });
+            }
+            
+            updateScoreDisplay();
+            updateTrumpDisplay();
+            updateActionButtons();
+        }
+
+        function startNewRound() {
+            game.deal();
+            updateGameStatus('New round! Select trump...');
+            renderGameState();
+            
+            // Show kitty card
+            setTimeout(() => {
+                updateCenterMessage(`Kitty: ${game.kitty.rank}${SUIT_SYMBOLS[game.kitty.suit]}`);
+                trumpSelectionPhase();
+            }, 1000);
+        }
+
+        function trumpSelectionPhase() {
+            // Round 1: Order up kitty or pass
+            let currentBidder = (game.dealer + 1) % 4;
+            
+            function doBid() {
+                if (currentBidder === 0) {
+                    // Player's turn
+                    const buttonsDiv = document.getElementById('action-buttons');
+                    buttonsDiv.innerHTML = `
+                        <button onclick="orderUpKitty()">Order Up</button>
+                        <button onclick="passTrump()">Pass</button>
+                    `;
+                } else {
+                    // AI decision
+                    const decision = game.aiTrumpDecision(currentBidder, 1);
+                    setTimeout(() => {
+                        if (decision === 'order-up') {
+                            game.trumpSuit = game.kitty.suit;
+                            game.trumpCaller = currentBidder;
+                            updateCenterMessage(`${game.players[currentBidder].name} orders up ${SUIT_SYMBOLS[game.kitty.suit]}`);
+                            setTimeout(() => startPlaying(), 2000);
+                        } else {
+                            currentBidder = (currentBidder + 1) % 4;
+                            if (currentBidder === (game.dealer + 1) % 4) {
+                                // Round 2: pick any suit except kitty
+                                round2Selection();
+                            } else {
+                                doBid();
+                            }
+                        }
+                    }, 800);
+                }
+            }
+            
+            doBid();
+        }
+
+        window.orderUpKitty = function() {
+            game.trumpSuit = game.kitty.suit;
+            game.trumpCaller = 0;
+            updateCenterMessage(`You order up ${SUIT_SYMBOLS[game.kitty.suit]}`);
+            document.getElementById('action-buttons').innerHTML = '';
+            setTimeout(() => startPlaying(), 2000);
+        };
+
+        window.passTrump = function() {
+            let currentBidder = 1;
+            
+            function continueRound1() {
+                const decision = game.aiTrumpDecision(currentBidder, 1);
+                if (decision === 'order-up') {
+                    game.trumpSuit = game.kitty.suit;
+                    game.trumpCaller = currentBidder;
+                    updateCenterMessage(`${game.players[currentBidder].name} orders up ${SUIT_SYMBOLS[game.kitty.suit]}`);
+                    document.getElementById('action-buttons').innerHTML = '';
+                    setTimeout(() => startPlaying(), 2000);
+                } else {
+                    currentBidder++;
+                    if (currentBidder === 4) {
+                        round2Selection();
+                    } else {
+                        setTimeout(continueRound1, 800);
+                    }
+                }
+            }
+            
+            document.getElementById('action-buttons').innerHTML = '';
+            continueRound1();
+        };
+
+        function round2Selection() {
+            updateCenterMessage('Round 2: Pick a suit');
+            const buttonsDiv = document.getElementById('action-buttons');
+            buttonsDiv.innerHTML = '';
+            
+            SUITS.filter(s => s !== game.kitty.suit).forEach(suit => {
+                const btn = document.createElement('button');
+                btn.textContent = SUIT_SYMBOLS[suit];
+                btn.style.color = SUIT_COLORS[suit];
+                btn.onclick = () => {
+                    game.trumpSuit = suit;
+                    game.trumpCaller = 0;
+                    updateCenterMessage(`You call ${SUIT_SYMBOLS[suit]}`);
+                    buttonsDiv.innerHTML = '';
+                    setTimeout(() => startPlaying(), 2000);
+                };
+                buttonsDiv.appendChild(btn);
+            });
+        }
+
+        function startPlaying() {
+            game.phase = 'playing';
+            updateCenterMessage('');
+            updateTrumpDisplay();
+            renderGameState();
+            
+            if (!game.players[game.currentPlayer].isHuman) {
+                setTimeout(() => game.aiPlay(), 1000);
+            } else {
+                updateGameStatus('Your turn! Click a card to play.');
+            }
+        }
+
+        // ===== INITIALIZATION =====
+        
+        // Test function to verify cards are visible
+        window.testCards = function() {
+            console.log('Testing card visibility...');
+            const playerHand = document.getElementById('player-hand');
+            
+            // Clear any existing cards
+            while (playerHand.firstChild) {
+                playerHand.removeChild(playerHand.firstChild);
+            }
+            
+            // Create 5 test cards
+            const testCards = [
+                { suit: 'hearts', rank: 'A' },
+                { suit: 'diamonds', rank: 'K' },
+                { suit: 'clubs', rank: 'Q' },
+                { suit: 'spades', rank: 'J' },
+                { suit: 'hearts', rank: '10' }
+            ];
+            
+            testCards.forEach((card, index) => {
+                const xOffset = (index - 2) * 0.35;
+                const cardEntity = createCard(card, `${xOffset} 0 0`, '0 0 0', 1.5, true); // Make clickable
+                
+                // Add test click handler
+                cardEntity.addEventListener('click', function() {
+                    console.log('TEST CARD CLICKED:', card);
+                    updateCenterMessage(`You clicked ${card.rank} of ${card.suit}!`);
+                    setTimeout(() => updateCenterMessage('Click working! 👍'), 2000);
+                });
+                
+                playerHand.appendChild(cardEntity);
+                console.log('Added test card:', card);
+            });
+            
+            updateGameStatus('Test cards loaded! Try clicking them.');
+            updateCenterMessage('Look at a card and click/trigger');
+        };
+        
+        window.addEventListener('load', () => {
+            console.log('Game loading...');
+            updateGameStatus('Welcome to VR Euchre!');
+            updateScoreDisplay();
+        });
+    </script>
+</body>
+</html>
